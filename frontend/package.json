@@ -1,0 +1,31 @@
+{
+  "name": "video-ai-platform-frontend",
+  "version": "1.0.0",
+  "description": "Video AI Platform - Frontend Vue 3",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["video", "ai", "transcription", "vue3"],
+  "author": "Video AI Platform",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "keycloak-js": "^26.2.1",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.22",
+    "vue-router": "^4.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.16",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vue-tsc": "^3.1.1"
+  }
+}
