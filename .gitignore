@@ -82,6 +82,13 @@ secrets/
 *.key
 *.crt
 
+# Environment files with credentials
+.env
+.env.local
+.env.*.local
+CREDENTIALS*.md
+*-CREDENTIALS.md
+
 # Temporary files
 tmp/
 temp/
