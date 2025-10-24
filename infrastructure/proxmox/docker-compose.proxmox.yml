@@ -20,6 +20,7 @@ volumes:
   temporal-data:
   prometheus-data:
   grafana-data:
+  n8n-data:
 
 services:
   # Database
@@ -265,7 +266,7 @@ services:
       - "8080:8080"
     restart: unless-stopped
 
-  # Worker - Transcription Service
+  # Worker - Transcription Service (Local CPU-based, optional)
   transcription-worker:
     image: videoai/transcription-worker:latest
     container_name: videoai-transcription-proxmox
@@ -278,6 +279,7 @@ services:
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio_prod_password}
       WHISPER_MODEL: base
+      WORKER_TYPE: cpu  # Differentiate from GCP GPU workers
     networks:
       videoai-network:
         ipv4_address: 172.18.0.21
@@ -288,3 +290,72 @@ services:
           memory: 4G
         reservations:
           memory: 2G
+    profiles:
+      - local-worker  # Only start if explicitly enabled
+
+  # Workflow Automation - n8n
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: videoai-n8n-proxmox
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      # Database
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: videoai
+      DB_POSTGRESDB_USER: videoai
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-prod_secure_password}
+
+      # Queue mode for scalability
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+
+      # Security
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-n8n_prod_password}
+
+      # Environment
+      N8N_HOST: 192.168.1.23
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://192.168.1.23:5678/
+
+      # Timezone
+      GENERIC_TIMEZONE: Europe/Paris
+      TZ: Europe/Paris
+
+      # Custom variables for our workflows
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio_prod_password}
+      PROJECTS_API_URL: http://projects-service:8080
+
+      # GCP GPU Worker routing
+      GCP_GPU_ENABLED: ${GCP_GPU_ENABLED:-false}
+      GCP_KAFKA_TOPIC: transcription.gpu.requests
+      LOCAL_KAFKA_TOPIC: transcription.cpu.requests
+    volumes:
+      - n8n-data:/home/node/.n8n
+      # Mount workflows directory for backup
+      - ./n8n-workflows:/home/node/.n8n/workflows:rw
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.22
+    ports:
+      - "5678:5678"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

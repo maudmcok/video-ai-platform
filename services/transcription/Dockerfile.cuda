@@ -1,0 +1,89 @@
+# Video AI Platform - Transcription Worker with CUDA
+# Multi-stage build for NVIDIA GPU-accelerated Whisper transcription
+
+# ==============================================
+# Stage 1: Base CUDA image with Python
+# ==============================================
+FROM nvidia/cuda:12.0.0-cudnn8-runtime-ubuntu22.04 AS base
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.11 and system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3-pip \
+    python3.11-dev \
+    ffmpeg \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# ==============================================
+# Stage 2: Dependencies installation
+# ==============================================
+FROM base AS dependencies
+
+WORKDIR /app
+
+# Copy requirements first (for caching)
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Install PyTorch with CUDA 12.0 support
+RUN pip3 install --no-cache-dir \
+    torch==2.1.2 \
+    torchvision==0.16.2 \
+    torchaudio==2.1.2 \
+    --index-url https://download.pytorch.org/whl/cu120
+
+# Install OpenAI Whisper with CUDA support
+RUN pip3 install --no-cache-dir \
+    openai-whisper==20231117 \
+    numba==0.58.1
+
+# ==============================================
+# Stage 3: Final runtime image
+# ==============================================
+FROM base AS runtime
+
+WORKDIR /app
+
+# Copy installed packages from dependencies stage
+COPY --from=dependencies /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+COPY --from=dependencies /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY worker.py .
+COPY config.py .
+
+# Create directory for model cache
+RUN mkdir -p /root/.cache/whisper
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+ENV WHISPER_MODEL=base
+ENV WHISPER_DEVICE=cuda
+ENV LOG_LEVEL=INFO
+
+# Labels
+LABEL maintainer="Video AI Platform"
+LABEL description="GPU-accelerated Whisper transcription worker"
+LABEL version="1.0.0-cuda"
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python3 -c "import torch; print('CUDA available:', torch.cuda.is_available())" || exit 1
+
+# Run the worker
+CMD ["python3", "worker.py"]

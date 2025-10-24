@@ -1,0 +1,270 @@
+{
+  "name": "Smart Transcription Router (Hybrid GPU)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "id": "kafka-trigger",
+      "name": "Kafka Trigger",
+      "type": "n8n-nodes-base.kafkaTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "video-transcription-request",
+      "credentials": {
+        "kafka": {
+          "id": "1",
+          "name": "Video AI Kafka"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$env.GCP_GPU_ENABLED}}",
+              "operation": "equals",
+              "value2": "true"
+            }
+          ],
+          "number": [
+            {
+              "value1": "={{$json.videoDuration}}",
+              "operation": "largerEqual",
+              "value2": 300
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "route-decision",
+      "name": "Route to GPU?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        470,
+        300
+      ],
+      "notes": "Route to GCP GPU if:\n- GCP_GPU_ENABLED=true\n- Video duration >= 5 minutes\n\nOtherwise use local CPU worker"
+    },
+    {
+      "parameters": {
+        "topic": "={{$env.GCP_KAFKA_TOPIC}}",
+        "message": "={{$json}}",
+        "options": {
+          "acks": 1,
+          "compression": 1
+        }
+      },
+      "id": "send-to-gcp-gpu",
+      "name": "Send to GCP GPU Worker",
+      "type": "n8n-nodes-base.kafka",
+      "typeVersion": 1,
+      "position": [
+        690,
+        200
+      ],
+      "credentials": {
+        "kafka": {
+          "id": "1",
+          "name": "Video AI Kafka"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "topic": "={{$env.LOCAL_KAFKA_TOPIC}}",
+        "message": "={{$json}}",
+        "options": {
+          "acks": 1,
+          "compression": 1
+        }
+      },
+      "id": "send-to-local-cpu",
+      "name": "Send to Local CPU Worker",
+      "type": "n8n-nodes-base.kafka",
+      "typeVersion": 1,
+      "position": [
+        690,
+        400
+      ],
+      "credentials": {
+        "kafka": {
+          "id": "1",
+          "name": "Video AI Kafka"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$env.PROJECTS_API_URL}}/api/projects/{{$json.projectId}}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "PROCESSING"
+            },
+            {
+              "name": "workerType",
+              "value": "={{$node[\"Route to GPU?\"].json.branch === \"true\" ? \"GCP_GPU\" : \"LOCAL_CPU\"}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "update-project-status",
+      "name": "Update Project Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        910,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "transcription:{{$json.projectId}}",
+        "value": "={{JSON.stringify($json)}}",
+        "options": {
+          "ttl": 86400
+        }
+      },
+      "id": "cache-in-redis",
+      "name": "Cache Request in Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1130,
+        300
+      ],
+      "credentials": {
+        "redis": {
+          "id": "2",
+          "name": "Video AI Redis"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "transcription-routing",
+        "jsonParameters": true,
+        "options": {}
+      },
+      "id": "log-to-prometheus",
+      "name": "Log Metrics",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1350,
+        300
+      ],
+      "code": "// Custom node to send metrics to Prometheus Pushgateway\nconst workerType = $input.item.json.workerType;\nconst videoDuration = $input.item.json.videoDuration;\n\n// Increment counter for worker type\nreturn [\n  {\n    json: {\n      metric: 'transcription_requests_total',\n      labels: { worker_type: workerType },\n      value: 1\n    }\n  },\n  {\n    json: {\n      metric: 'video_duration_seconds',\n      labels: { worker_type: workerType },\n      value: videoDuration\n    }\n  }\n];"
+    }
+  ],
+  "connections": {
+    "Kafka Trigger": {
+      "main": [
+        [
+          {
+            "node": "Route to GPU?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route to GPU?": {
+      "main": [
+        [
+          {
+            "node": "Send to GCP GPU Worker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send to Local CPU Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to GCP GPU Worker": {
+      "main": [
+        [
+          {
+            "node": "Update Project Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Local CPU Worker": {
+      "main": [
+        [
+          {
+            "node": "Update Project Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Project Status": {
+      "main": [
+        [
+          {
+            "node": "Cache Request in Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Request in Redis": {
+      "main": [
+        [
+          {
+            "node": "Log Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "id": "smart-transcription-router",
+  "meta": {
+    "instanceId": "videoai-n8n-proxmox"
+  },
+  "tags": [
+    {
+      "id": "gpu-routing",
+      "name": "GPU Routing"
+    },
+    {
+      "id": "hybrid-cloud",
+      "name": "Hybrid Cloud"
+    }
+  ]
+}
