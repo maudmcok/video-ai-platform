@@ -359,3 +359,30 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Frontend - Vue 3 Application
+  frontend:
+    image: videoai/frontend:latest
+    container_name: videoai-frontend-proxmox
+    depends_on:
+      projects-service:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    environment:
+      # These are used at build time, but we set them for clarity
+      VITE_API_URL: http://192.168.1.23:8080/api
+      VITE_KEYCLOAK_URL: http://192.168.1.23:8180
+      VITE_KEYCLOAK_REALM: videoai
+      VITE_KEYCLOAK_CLIENT_ID: video-ai-platform
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.23
+    ports:
+      - "3001:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
