@@ -1,0 +1,290 @@
+version: '3.8'
+
+# Video AI Platform - Proxmox Deployment Configuration
+# Target: Docker VM at 192.168.1.23
+# Network: 172.17.0.0/16
+
+networks:
+  videoai-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  zookeeper-data:
+  minio-data:
+  temporal-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+  # Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: videoai-postgres-proxmox
+    environment:
+      POSTGRES_DB: videoai
+      POSTGRES_USER: videoai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prod_secure_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.10
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U videoai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Cache
+  redis:
+    image: redis:7-alpine
+    container_name: videoai-redis-proxmox
+    volumes:
+      - redis-data:/data
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.11
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Message Queue - Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: videoai-zookeeper-proxmox
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.12
+    restart: unless-stopped
+
+  # Message Queue - Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: videoai-kafka-proxmox
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://192.168.1.23:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.13
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Object Storage - MinIO
+  minio:
+    image: minio/minio:latest
+    container_name: videoai-minio-proxmox
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_prod_password}
+    volumes:
+      - minio-data:/data
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.14
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Identity Provider - Keycloak
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: videoai-keycloak-proxmox
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/videoai
+      KC_DB_USERNAME: videoai
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-prod_secure_password}
+      KC_HOSTNAME: 192.168.1.23
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-keycloak_prod_password}
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.15
+    ports:
+      - "8180:8080"
+    command: start-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Workflow Engine - Temporal
+  temporal:
+    image: temporalio/auto-setup:1.22.0
+    container_name: videoai-temporal-proxmox
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: videoai
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-prod_secure_password}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    volumes:
+      - temporal-data:/etc/temporal
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.16
+    ports:
+      - "7233:7233"
+    restart: unless-stopped
+
+  # Temporal UI
+  temporal-ui:
+    image: temporalio/ui:2.21.0
+    container_name: videoai-temporal-ui-proxmox
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://192.168.1.23:8088
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.17
+    ports:
+      - "8088:8080"
+    restart: unless-stopped
+
+  # Monitoring - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: videoai-prometheus-proxmox
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.18
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    restart: unless-stopped
+
+  # Visualization - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: videoai-grafana-proxmox
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana_prod_password}
+      GF_SERVER_ROOT_URL: http://192.168.1.23:3000
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.19
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # Application - Projects Service
+  projects-service:
+    image: videoai/projects-service:latest
+    container_name: videoai-projects-proxmox
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      QUARKUS_DATASOURCE_REACTIVE_URL: postgresql://postgres:5432/videoai
+      QUARKUS_DATASOURCE_USERNAME: videoai
+      QUARKUS_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-prod_secure_password}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      QUARKUS_REDIS_HOSTS: redis://redis:6379
+      QUARKUS_OIDC_AUTH_SERVER_URL: http://keycloak:8080/realms/videoai
+      QUARKUS_S3_ENDPOINT_OVERRIDE: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio_prod_password}
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.20
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # Worker - Transcription Service
+  transcription-worker:
+    image: videoai/transcription-worker:latest
+    container_name: videoai-transcription-proxmox
+    depends_on:
+      - kafka
+      - minio
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio_prod_password}
+      WHISPER_MODEL: base
+    networks:
+      videoai-network:
+        ipv4_address: 172.18.0.21
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
